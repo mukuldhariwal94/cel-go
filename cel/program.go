@@ -209,8 +209,11 @@ func newProgram(e *Env, a *ast.AST, opts []ProgramOption) (Program, error) {
 	}
 
 	// Add the function bindings created via Function() options.
-	err = disp.Add(e.functionBindings...)
-	if err != nil {
+	// For type-checked ASTs, only add the overloads that are actually referenced
+	// by this expression. The full e.functionBindings slice (~345 entries) is
+	// already computed once per Env by funcBindOnce; this call filters which
+	// entries are added to this specific program's dispatcher.
+	if err = addNeededBindings(disp, e, a); err != nil {
 		return nil, err
 	}
 
@@ -294,7 +297,81 @@ func (p *prog) initInterpretable(a *ast.AST, plannerOptions []interpreter.Planne
 	if oi, ok := interpretable.(*interpreter.ObservableInterpretable); ok {
 		p.observable = oi
 	}
+	// The interpreter and dispatcher are only used during planning above.
+	// Every function pointer is baked into the interpretable tree; Eval() never
+	// consults these fields again.  Release them so the GC reclaims the
+	// dispatcher map instead of retaining it for the entire program lifetime.
+	p.interpreter = nil
+	p.dispatcher = nil
 	return p, nil
+}
+
+// addNeededBindings populates the dispatcher with the function overload bindings
+// that are actually used by the expression.
+//
+// For type-checked ASTs it iterates e.functionBindings (pre-computed once per Env
+// by funcBindOnce) and only calls disp.Add for entries whose overload ID appears
+// in the expression's ReferenceMap.
+//
+// Dispatch key mechanics:
+//   - Per-overload bindings: Overload.Operator is the overload ID (e.g. "int_add_int")
+//     → filter by the used-overload-ID set.
+//   - Singleton bindings:    Overload.Operator is the function name (e.g. "_+_")
+//     → detect by checking if the operator is a key in e.functions, then include
+//     whenever any overload of that function appears in the reference map.
+//
+// Falls back to binding all entries for unchecked (parse-only) ASTs.
+func addNeededBindings(disp interpreter.Dispatcher, e *Env, a *ast.AST) error {
+	refMap := a.ReferenceMap()
+	if !a.IsChecked() || len(refMap) == 0 {
+		return disp.Add(e.functionBindings...)
+	}
+
+	// Collect overload IDs referenced by this expression.
+	usedOIDs := make(map[string]struct{}, len(refMap)*2)
+	for _, ref := range refMap {
+		for _, oID := range ref.OverloadIDs {
+			usedOIDs[oID] = struct{}{}
+		}
+	}
+
+	// Build a reverse index: overload ID → function name.
+	// Required to determine which singleton-bound functions (whose dispatcher key
+	// is the function name, not the overload ID) are actually needed.
+	overloadToFnName := make(map[string]string, len(e.functions)*3)
+	for name, fn := range e.functions {
+		for _, o := range fn.OverloadDecls() {
+			overloadToFnName[o.ID()] = name
+		}
+	}
+
+	// Identify which function names have at least one referenced overload.
+	neededFns := make(map[string]struct{}, len(usedOIDs))
+	for oID := range usedOIDs {
+		if fnName, ok := overloadToFnName[oID]; ok {
+			neededFns[fnName] = struct{}{}
+		}
+	}
+
+	// Add only the needed bindings. Singleton functions are detected by checking
+	// whether Overload.Operator is a key in e.functions (function names are always
+	// distinct from overload IDs in CEL's naming conventions).
+	for _, b := range e.functionBindings {
+		_, isSingleton := e.functions[b.Operator]
+		if isSingleton {
+			if _, needed := neededFns[b.Operator]; !needed {
+				continue
+			}
+		} else {
+			if _, used := usedOIDs[b.Operator]; !used {
+				continue
+			}
+		}
+		if err := disp.Add(b); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Eval implements the Program interface method.
