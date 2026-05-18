@@ -193,25 +193,53 @@ func newProgram(e *Env, a *ast.AST, opts []ProgramOption) (Program, error) {
 		}
 	}
 
-	e.funcBindOnce.Do(func() {
-		var bindings []*functions.Overload
-		e.functionBindings = []*functions.Overload{}
+	refMap := a.ReferenceMap()
+	if a.IsChecked() && len(refMap) != 0 {
+		// Checked AST: build the set of overload IDs actually used by this expression
+		// and only add bindings for functions that have at least one matching overload.
+		usedOIDs := make(map[string]struct{}, len(refMap))
+		for _, refInfo := range refMap {
+			for _, oID := range refInfo.OverloadIDs {
+				usedOIDs[oID] = struct{}{}
+			}
+		}
+		// local, not e.functionBindings
+		var progBindings []*functions.Overload
 		for _, fn := range e.functions {
+			if !fn.OverlapsOIDs(usedOIDs) {
+				continue
+			}
+			var bindings []*functions.Overload
 			bindings, err = fn.Bindings()
 			if err != nil {
-				return
+				return nil, err
 			}
-			e.functionBindings = append(e.functionBindings, bindings...)
+			progBindings = append(progBindings, bindings...)
 		}
-	})
-	if err != nil {
-		return nil, err
-	}
 
-	// Add the function bindings created via Function() options.
-	err = disp.Add(e.functionBindings...)
-	if err != nil {
-		return nil, err
+		if err = disp.Add(progBindings...); err != nil {
+			return nil, err
+		}
+	} else {
+		// Unchecked AST or empty ref-map: add all function bindings as before.
+		e.funcBindOnce.Do(func() {
+			var bindings []*functions.Overload
+			e.functionBindings = []*functions.Overload{}
+			for _, fn := range e.functions {
+				bindings, err = fn.Bindings()
+				if err != nil {
+					return
+				}
+				e.functionBindings = append(e.functionBindings, bindings...)
+			}
+		})
+		if err != nil {
+			return nil, err
+		}
+		// Add the function bindings created via Function() options.
+		if err = disp.Add(e.functionBindings...); err != nil {
+			return nil, err
+		}
 	}
 
 	// Set the attribute factory after the options have been set.

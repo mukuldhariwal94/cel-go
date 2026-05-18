@@ -290,6 +290,23 @@ func (f *FunctionDecl) AddOverload(overload *OverloadDecl) error {
 	return nil
 }
 
+// OverlapsOIDs reports whether any overload declared by this function appears
+// in usedOIDs. It iterates f.overloads (typically 1–4 entries — the smaller,
+// constant side of the intersection) and performs one O(1) lookup into
+// usedOIDs per entry, which is cheaper than iterating usedOIDs (up to ~20
+// entries) and probing f.overloads for each.
+func (f *FunctionDecl) OverlapsOIDs(usedOIDs map[string]struct{}) bool {
+	if f == nil {
+		return false
+	}
+	for id := range f.overloads {
+		if _, ok := usedOIDs[id]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // OverloadDecls returns the overload declarations in the order in which they were declared.
 func (f *FunctionDecl) OverloadDecls() []*OverloadDecl {
 	var emptySet []*OverloadDecl
