@@ -31,7 +31,6 @@ import (
 	"cel.dev/cel-go/common/cost"
 	"cel.dev/cel-go/common/decls"
 	"cel.dev/cel-go/common/env"
-	"cel.dev/cel-go/common/functions"
 	"cel.dev/cel-go/common/stdlib"
 	"cel.dev/cel-go/common/types"
 	"cel.dev/cel-go/common/types/ref"
@@ -163,12 +162,10 @@ type Env struct {
 
 	parent *Env
 
-	// sharedDispatcher caches a dispatcher populated with the env's function
-	// bindings, built once and reused across every Program() constructed from
-	// this env. It is read-only after construction; each Program layers a thin
-	// child over it for per-program Functions(). Extended envs reuse the parent's
-	// dispatcher if functions are unchanged.
-	sharedDispatcher interpreter.Dispatcher
+	// sharedDispatcher indexes binding names without constructing implementations.
+	// Bindings are initialized on first lookup and shared across programs and
+	// extended environments whose function declarations are unchanged.
+	sharedDispatcher *functionDispatcher
 	dispOnce         sync.Once
 	hasAsync         bool
 	dispErr          error
@@ -814,31 +811,24 @@ func (e *Env) initDispatcher() (interpreter.Dispatcher, bool, error) {
 			// The dispatcher setup is skipped when the child has mutated the function set.
 			// As the child function set contains a copy of all parent function declarations
 			// by virtue of copy on write semantics.
-			d, hasAsync, err := e.parent.initDispatcher()
-			e.sharedDispatcher = d
+			_, hasAsync, err := e.parent.initDispatcher()
+			e.sharedDispatcher = e.parent.sharedDispatcher
 			e.hasAsync = hasAsync
 			e.dispErr = err
 			return
 		}
-		hasAsync := false
-		var bindings []*functions.Overload
-		for _, fn := range e.functions {
-			bs, err := fn.Bindings()
-			if err != nil {
-				e.dispErr = err
-				return
+		var parent *functionDispatcher
+		if e.parent != nil {
+			// A child can replace an invalid parent declaration. In that case,
+			// build an independent registry and validate the child's definitions.
+			if _, _, err := e.parent.initDispatcher(); err == nil {
+				parent = e.parent.sharedDispatcher
 			}
-			for _, b := range bs {
-				if b.Async != nil {
-					hasAsync = true
-				}
-			}
-			bindings = append(bindings, bs...)
 		}
-		d := interpreter.NewDispatcher()
-		e.dispErr = d.Add(bindings...)
-		e.sharedDispatcher = d
-		e.hasAsync = hasAsync
+		e.sharedDispatcher, e.dispErr = newFunctionDispatcher(e, parent)
+		for _, fn := range e.functions {
+			e.hasAsync = e.hasAsync || fn.IsAsync()
+		}
 	})
 	return e.sharedDispatcher, e.hasAsync, e.dispErr
 }

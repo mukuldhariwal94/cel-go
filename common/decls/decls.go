@@ -346,8 +346,53 @@ func (f *FunctionDecl) HasLateBinding() bool {
 	return false
 }
 
+// BindingNames returns the dispatcher keys produced by Bindings without creating
+// the implementations. It performs the same binding configuration validation.
+func (f *FunctionDecl) BindingNames() ([]string, error) {
+	if err := f.validateBindings(); err != nil {
+		return nil, err
+	}
+	if f == nil {
+		return nil, nil
+	}
+	if f.singleton != nil {
+		return []string{f.Name()}, nil
+	}
+	var names []string
+	for _, id := range f.overloadOrdinals {
+		o := f.overloads[id]
+		if o.HasBinding() || o.HasLateBinding() {
+			names = append(names, id)
+		}
+	}
+	if len(names) != 0 && (len(names) != 1 || names[0] != f.Name()) {
+		names = append(names, f.Name())
+	}
+	return names, nil
+}
+
+func (f *FunctionDecl) validateBindings() error {
+	if f == nil || f.singleton == nil {
+		return nil
+	}
+	hasBinding := false
+	for _, o := range f.overloads {
+		if o.HasLateBinding() {
+			return fmt.Errorf("singleton function incompatible with late bindings: %s", f.Name())
+		}
+		hasBinding = hasBinding || o.HasBinding()
+	}
+	if hasBinding {
+		return fmt.Errorf("singleton function incompatible with specialized overloads: %s", f.Name())
+	}
+	return nil
+}
+
 // Bindings produces a set of function bindings, if any are defined.
 func (f *FunctionDecl) Bindings() ([]*functions.Overload, error) {
+	if err := f.validateBindings(); err != nil {
+		return nil, err
+	}
 	var emptySet []*functions.Overload
 	if f == nil {
 		return emptySet, nil
@@ -371,12 +416,6 @@ func (f *FunctionDecl) Bindings() ([]*functions.Overload, error) {
 		nonStrict = nonStrict || o.IsNonStrict()
 	}
 	if f.singleton != nil {
-		if hasLateBinding {
-			return nil, fmt.Errorf("singleton function incompatible with late bindings: %s", f.Name())
-		}
-		if len(overloads) != 0 {
-			return nil, fmt.Errorf("singleton function incompatible with specialized overloads: %s", f.Name())
-		}
 		overloads = []*functions.Overload{
 			{
 				Operator:     f.Name(),
